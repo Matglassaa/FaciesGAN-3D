@@ -1161,6 +1161,63 @@ class PostProcessing:
             plt.show()
         else: 
             plt.close(fig)
+    
+    def generate_2d_mds_plot(self, subset_size=100, figsize=(6, 8), save_plot=False):
+        """Generates a 2D MDS plot comparing the spread of facies proportions between Flumy and GAN samples."""
+
+        print("\n=== Generating Output: 2D MDS Flumy vs GAN Comparison Plot ===")
+        
+        if not self.gan_data:
+            self.load_gan_samples(limit=subset_size)
+        if not self.flumy_samples:
+            self.load_flumy_samples(limit=subset_size)
+            
+        flumy_to_process = self.flumy_samples[:subset_size]
+        gan_to_process = self.gan_data[:subset_size]
+        
+        all_features = []
+        labels = []
+        facies_codes = self.cfg['codes']
+        
+        for grid in flumy_to_process:
+            props = [np.sum(grid == f) / grid.size for f in facies_codes]
+            all_features.append(props)
+            labels.append(self.flumy_name)
+            
+        for grid in gan_to_process:
+            props = [np.sum(grid == f) / grid.size for f in facies_codes]
+            all_features.append(props)
+            labels.append(self.gan_name)
+            
+        features_matrix = np.array(all_features)
+        
+        mds = MDS(n_components=2, dissimilarity='euclidean', random_state=42, n_jobs=-1)
+        embeddings = mds.fit_transform(features_matrix)
+        
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        unique_labels = [self.flumy_name, self.gan_name]
+        markers = ['o', 's']
+        
+        for i, l in enumerate(unique_labels):
+            idx = [j for j, val in enumerate(labels) if val == l]
+            ax.scatter(
+                embeddings[idx, 0], embeddings[idx, 1],
+                marker=markers[i], label=f"{l} (N={len(idx)})",
+                s=35, alpha=0.8, edgecolors='white', linewidths=0.4
+            )
+            
+        ax.set_title("MDS Spatial Clustering (Global Facies Proportions)", pad=10)
+        ax.tick_params(axis='both', labelsize=10)
+        ax.grid(color='#BFBFBF', alpha=0.4, linestyle='--', linewidth=0.5)
+        ax.legend(loc='best', frameon=True)
+        
+        if save_plot:
+            out_mds_path = os.path.join(self.output_dir, f"mds_comparison_{subset_size}_samples.png")
+            plt.savefig(out_mds_path, bbox_inches='tight', dpi=400)
+            print(f"Saved 2D MDS Plot to: {out_mds_path}")
+            
+        plt.show()
 
     def plot_3d_entropy_pyvista(self, data_source='gan', figsize=None, show_plot=True, save_plot=True):
         """Renders a 3D volumetric field of full continuous coordinates uncertainty bounded at [0.0, 1.0].
@@ -1981,6 +2038,21 @@ class DistributionEvaluator:
         embeddings = reducer.fit_transform(combined_distances)
         print(f"MDS stress: {reducer.stress_:.4f}")
 
+        # --- NEW CODE: Create a list of labels corresponding to each point ---
+        expanded_labels = []
+        for label in all_labels:
+            n = cached_data[label]['distances'].shape[0]
+            expanded_labels.extend([label] * n)
+            
+        # --- NEW CODE: Save coordinates to CSV ---
+        df_coords = pd.DataFrame({
+            'Dimension 1': embeddings[:, 0],
+            'Dimension 2': embeddings[:, 1],
+            'Dataset': expanded_labels
+        })
+        csv_path = os.path.join(self.output_dir, "msswd_mds_coordinates.csv")
+        df_coords.to_csv(csv_path, index=False)
+        print(f"Saved 2D coordinates to CSV: {csv_path}")
         # Plot
         figsize = figsize or (8, 8)
         fig, ax = plt.subplots(figsize=figsize)
