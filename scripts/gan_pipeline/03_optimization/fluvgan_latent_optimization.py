@@ -40,7 +40,6 @@ from voxgan.networks import resnet
 
 class MultiChannelContextLoss(_Loss):
     def __init__(self, data_indices, data_values, threshold, shape, nc, spacing=None, p=1, device=None):
-        # We no longer need the 'reduction' argument here
         super(MultiChannelContextLoss, self).__init__(None, None, 'mean')
         self.nc = nc
         
@@ -73,12 +72,18 @@ class MultiChannelContextLoss(_Loss):
         # input: (B, C, Z, Y, X), self._target: (C, Z, Y, X)
         diff = self._p(input - self._target)
         masked_diff = self._mask * diff
+            
+        return torch.sum(masked_diff)
+    # def forward(self, input):
+    #     # input: (B, C, Z, Y, X), self._target: (C, Z, Y, X)
+    #     diff = self._p(input - self._target)
+    #     masked_diff = self._mask * diff
         
-        mask_sum = torch.sum(self._mask)
-        if mask_sum > 0:
-            return torch.sum(masked_diff) / mask_sum
-        else:
-            return torch.sum(masked_diff)
+    #     mask_sum = torch.sum(self._mask)
+    #     if mask_sum > 0:
+    #         return torch.sum(masked_diff) / mask_sum
+    #     else:
+    #         return torch.sum(masked_diff)
 
 def map_facies(val):
     """Maps raw facies values to 3 classes (0=Channel, 1=Levee, 2=Overbank)."""
@@ -175,6 +180,7 @@ def main():
     tabs = ['DEL-GT-01', 'DEL-GT-02-S2']
     all_indices = []
     all_values = []
+    debug_records = [] # Container to store details for validation printing
     
     for tab in tabs:
         df = pd.read_excel(args.well_data_path, sheet_name=tab)
@@ -190,12 +196,45 @@ def main():
             
             # Ensure within grid bounds (128x128)
             if 0 <= x < 128 and 0 <= y < 128:
+                raw_val = row[facies_col]
+                mapped_val = map_facies(raw_val)
+                
                 all_indices.append([z, y, x])
-                all_values.append(map_facies(row[facies_col]))
+                all_values.append(mapped_val)
+                debug_records.append({
+                    'well': tab,
+                    'z': z, 'y': y, 'x': x,
+                    'raw_value': raw_val,
+                    'mapped_value': mapped_val
+                })
 
     X = torch.tensor(all_indices).T # (3, N)
     y = torch.tensor(all_values)    # (N,)
     print(f"Conditioning on {len(all_values)} data points.")
+
+    print("\n" + "="*85)
+    print("                      WELL CONDITIONING VERIFICATION REPORT")
+    print("="*85)
+    print(f"{'Well Tab':<15} | {'Grid Coordinate (Z, Y, X)':<27} | {'Raw Facies':<12} | {'Mapped Class (ID)':<18}")
+    print("-"*85)
+    for rec in debug_records:
+        class_name = {0: "Channel (0)", 1: "Levee (1)", 2: "Overbank (2)"}.get(rec['mapped_value'], "Unknown")
+        coord_str = f"({rec['z']}, {rec['y']}, {rec['x']})"
+        print(f"{rec['well']:<15} | {coord_str:<27} | {rec['raw_value']:<12.1f} | {class_name:<18}")
+    
+    print("-"*85)
+    # Class distribution summary per well
+    summary_df = pd.DataFrame(debug_records)
+    print("Class distribution summary:")
+    for well_name in tabs:
+        well_subset = summary_df[summary_df['well'] == well_name]
+        counts = well_subset['mapped_value'].value_counts()
+        print(f"  * {well_name:<15} -> Channel (0): {counts.get(0, 0):<3} | Levee (1): {counts.get(1, 0):<3} | Overbank (2): {counts.get(2, 0):<3}")
+    
+    total_counts = summary_df['mapped_value'].value_counts()
+    print(f"  * {'TOTAL':<15} -> Channel (0): {total_counts.get(0, 0):<3} | Levee (1): {total_counts.get(1, 0):<3} | Overbank (2): {total_counts.get(2, 0):<3}")
+    print("="*85 + "\n")
+    # ==============================================================================
 
     ################################################################################
     # Inference / Optimization
@@ -228,8 +267,8 @@ def main():
             l_context = loss_fn_context(samples)
             l_prior = loss_fn_prior(proba['data'], label_real.expand_as(proba['data']))
             
-            loss = l_context + 10.0 * l_prior
-            #loss = 10.0 * l_context + 1.0 * l_prior
+            # Use the correct balanced weight strategy
+            loss = 10.0 * l_context + 1.0 * l_prior
             
             loss.backward()
             optimizer.step()

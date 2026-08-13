@@ -87,429 +87,17 @@ def get_facies_config(num_classes=3):
     else:
         raise ValueError(f"num_classes={num_classes} not supported.")
 
-import glob
-import math
+
 import os
-import random
+import glob
 import warnings
-import matplotlib.colors as mcolors
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from scipy.stats import entropy
-from sklearn.metrics import auc, f1_score, roc_curve
+from sklearn.metrics import f1_score, roc_curve, auc
 from sklearn.preprocessing import label_binarize
-
-
-class WellMismatch:
-    """Quantifies the degree of mismatch between the 3D realizations and the well data.
-
-    Calculates the Macro F1 score to evaluate how accurately the generated grid
-    captures the well data. Macro F1 is used to account for geological class
-    imbalance, giving equal weight to minority facies (e.g., channels).
-    """
-
-    def __init__(self, flumy_name, gan_name, data_dir, well_data_path, num_classes=3):
-        self.flumy_name = flumy_name
-        self.gan_name = gan_name
-        self.num_classes = num_classes
-        self.cfg = get_facies_config(num_classes)
-
-        self.data_files = sorted(glob.glob(str(data_dir)))
-        if not self.data_files:
-            print(f"Warning: No files found matching {data_dir}")
-
-        self.well_data_path = well_data_path
-        self.well_coords = []
-        self.well_true_facies = []
-
-        self._load_well_data()
-
-    def _load_well_data(self):
-        """Loads and maps the well data coordinates and true facies."""
-        try:
-            ORIGIN_E = 84337.0
-            ORIGIN_N = 445750.0
-            SPACING = 20.0
-
-            tabs = ["DEL-GT-01", "DEL-GT-02-S2"]
-
-            for tab in tabs:
-                df = pd.read_excel(self.well_data_path, sheet_name=tab)
-                df_32 = df.head(32)
-
-                facies_col = "Facies " if "Facies " in df.columns else "Facies"
-
-                for i, row in df_32.iterrows():
-                    z = i
-                    y = int(np.round((row["GRID N"] - ORIGIN_N) / SPACING))
-                    x = int(np.round((row["GRID E"] - ORIGIN_E) / SPACING))
-
-                    if 0 <= x < 128 and 0 <= y < 128:
-                        raw_facies = row[facies_col]
-
-                        if self.num_classes == 3:
-                            if 1 <= raw_facies <= 3:
-                                mapped_facies = 1
-                            elif 4 <= raw_facies <= 7:
-                                mapped_facies = 4
-                            elif 8 <= raw_facies <= 12:
-                                mapped_facies = 8
-                            else:
-                                mapped_facies = 1
-                        elif self.num_classes == 9:
-                            mapped_facies = (
-                                raw_facies if 1 <= raw_facies <= 9 else 1
-                            )
-                        else:
-                            mapped_facies = 1
-
-                        self.well_coords.append((z, y, x))
-                        self.well_true_facies.append(mapped_facies)
-
-            print(f"Loaded {len(self.well_coords)} well conditioning points.")
-
-        except Exception as e:
-            print(f"Error loading well data: {e}")
-
-    def _load_and_map_realization(self, file_path):
-        """Loads a single realization and maps it to physical facies codes."""
-        if file_path.endswith(".npz"):
-            with np.load(file_path) as data:
-                raw_arr = (
-                    data["facies"] if "facies" in data else data[data.files[0]]
-                )
-        else:
-            raw_arr = np.load(file_path)
-
-        if raw_arr.ndim == 4:
-            class_indices = np.argmax(raw_arr, axis=0)
-        elif raw_arr.ndim == 3:
-            class_indices = np.round(raw_arr).astype(int)
-        else:
-            raise ValueError(
-                f"Unexpected array shape {raw_arr.shape} in {file_path}"
-            )
-
-        mapping = np.array(self.cfg["codes"])
-        class_indices = np.clip(class_indices, 0, len(mapping) - 1)
-        return mapping[class_indices]
-
-    def compute_mismatch(self):
-        """Computes the Macro and Per-Class F1 scores for all loaded realizations against well data."""
-        if not self.well_coords:
-            print("No well coordinates loaded. Cannot compute mismatch.")
-            return None
-
-        results = []
-        
-        # Define the expected facies classes (assuming 1, 2, and 3 based on your 3-facies grouping)
-        # Adjust these labels if your integers are 0, 1, 2.
-        expected_labels = [1, 2, 3] 
-
-        for file_path in self.data_files:
-            try:
-                grid = self._load_and_map_realization(file_path)
-
-                y_pred = []
-                y_true_valid = []
-
-                for (z, y, x), true_facies in zip(
-                    self.well_coords, self.well_true_facies
-                ):
-                    if (
-                        0 <= z < grid.shape[0]
-                        and 0 <= y < grid.shape[1]
-                        and 0 <= x < grid.shape[2]
-                    ):
-                        y_pred.append(grid[z, y, x])
-                        y_true_valid.append(true_facies)
-
-                # Compute Macro F1 (Your original metric)
-                macro_f1 = f1_score(y_true_valid, y_pred, average="macro", zero_division=0)
-                
-                # Compute Per-Class F1 (This isolates the failing facies)
-                per_class_f1 = f1_score(y_true_valid, y_pred, average=None, labels=expected_labels, zero_division=0)
-
-                results.append(
-                    {
-                        "Realization": os.path.basename(file_path),
-                        "Macro_F1_Score": macro_f1,
-                        "F1_Class_1_Channel": per_class_f1[0],
-                        "F1_Class_2_Levee": per_class_f1[1],
-                        "F1_Class_3_Overbank": per_class_f1[2],
-                    }
-                )
-
-            except Exception as e:
-                print(f"Error processing {file_path} for mismatch: {e}")
-
-        df_results = pd.DataFrame(results)
-
-        if not df_results.empty:
-            mean_f1 = df_results["Macro_F1_Score"].mean()
-            print(f"\n--- Well Data Mismatch ---")
-            print(f"Evaluated {len(results)} realizations.")
-            print(f"Average Macro F1 Score: {mean_f1:.4f}")
-            
-            # Print average per-class performance to immediately see the weak link
-            print(f"Average F1 Class 1 (Channel): {df_results['F1_Class_1_Channel'].mean():.4f}")
-            print(f"Average F1 Class 2 (Levee): {df_results['F1_Class_2_Levee'].mean():.4f}")
-            print(f"Average F1 Class 3 (Overbank): {df_results['F1_Class_3_Overbank'].mean():.4f}")
-
-        return df_results
-
-    def plot_split_entropy(
-        self,
-        df_mismatch,
-        axis="Z",
-        num_slices=3,
-        figsize=None,
-        show_plot=True,
-        save_plot=False,
-        output_dir="outputs",
-    ):
-        if df_mismatch is None or df_mismatch.empty:
-            print("Error: Provide a valid mismatch DataFrame.")
-            return {}
-
-        if not self.data_files:
-            print("No realization files available.")
-            return {}
-
-        axis = axis.upper()
-        if axis not in ["X", "Y", "Z"]:
-            raise ValueError("axis must be 'X', 'Y', or 'Z'.")
-
-        # 1. Get grid dimensions from the first file
-        sample_grid = self._load_and_map_realization(self.data_files[0])
-        nz, ny, nx = sample_grid.shape
-        dims = {"Z": nz, "Y": ny, "X": nx}
-        max_slices = dims[axis]
-
-        # 2. Define ALL slices to get the true spatial mean across the whole volume
-        all_slice_indices = list(range(max_slices))
-
-        # 3. Calculate deterministic, evenly-spaced indices *only* for the visual plot
-        num_slices = min(num_slices, max_slices)
-        if num_slices == 1:
-            plot_slice_indices = [max_slices // 2]
-        else:
-            plot_slice_indices = np.linspace(0, max_slices - 1, num_slices, dtype=int).tolist()
-
-        # 4. Map filename strings to absolute file paths
-        basename_to_path = {os.path.basename(fp): fp for fp in self.data_files}
-
-        perfect_names = df_mismatch[df_mismatch["Macro_F1_Score"] == 1.0]["Realization"]
-        imperfect_names = df_mismatch[df_mismatch["Macro_F1_Score"] < 1.0]["Realization"]
-
-        perfect_paths = [basename_to_path[n] for n in perfect_names if n in basename_to_path]
-        imperfect_paths = [basename_to_path[n] for n in imperfect_names if n in basename_to_path]
-
-        print(f"\n--- Running Split Entropy Optimization Loop ({axis}-Axis) ---")
-        print(f"  Perfect Alignment Subgroup: {len(perfect_paths)} files")
-        print(f"  Imperfect Alignment Subgroup: {len(imperfect_paths)} files")
-
-        # 5. Extract group entropy passing ALL slice indices for accurate volume means
-        perf_maps_all, perf_mean = self._extract_group_entropy(perfect_paths, axis, all_slice_indices, dims)
-        imperf_maps_all, imperf_mean = self._extract_group_entropy(imperfect_paths, axis, all_slice_indices, dims)
-
-        # 6. Filter down the calculated maps list to just the ones chosen for plotting
-        # (Maps are stored sequentially from slice 0 to max_slices-1 inside the returned list)
-        perf_maps = [perf_maps_all[i] for i in plot_slice_indices] if perf_maps_all is not None else None
-        imperf_maps = [imperf_maps_all[i] for i in plot_slice_indices] if imperf_maps_all is not None else None
-
-        # 7. Build Double Plot Layout (Row 0: Perfect, Row 1: Imperfect)
-        if show_plot:
-            figsize = figsize or (5 * num_slices, 8)
-            fig, axes = plt.subplots(2, num_slices, figsize=figsize, sharex=True, sharey=True)
-            axes = np.atleast_2d(axes)  # Force 2D array structure even if num_slices=1
-
-            norm = mcolors.Normalize(vmin=0, vmax=1.0)
-            xlabel, ylabel = {"Z": ("X", "Y"), "Y": ("X", "Z"), "X": ("Y", "Z")}[axis]
-
-            for idx, slice_val in enumerate(plot_slice_indices):
-                # Top row: Perfect alignments
-                if perf_maps is not None:
-                    im = axes[0, idx].imshow(perf_maps[idx], cmap="magma", origin="lower", norm=norm)
-                    axes[0, idx].set_title(f"Perfect | {axis}-Slice {slice_val}",fontsize=10,c='#595959')
-                else:
-                    axes[0, idx].text(0.5, 0.5, "No Data", ha="center", va="center")
-
-                # Bottom row: Imperfect alignments
-                if imperf_maps is not None:
-                    im = axes[1, idx].imshow(imperf_maps[idx], cmap="magma", origin="lower", norm=norm)
-                    axes[1, idx].set_title(f"Imperfect | {axis}-Slice {slice_val}",fontsize=10,c='#595959')
-                else:
-                    axes[1, idx].text(0.5, 0.5, "No Data", ha="center", va="center")
-
-                # Apply labels
-                axes[0, idx].set_ylabel(ylabel)
-                axes[1, idx].set_ylabel(ylabel)
-                axes[1, idx].set_xlabel(xlabel)
-
-            # Add shared colorbar
-            fig.subplots_adjust(right=0.88)
-            cbar_ax = fig.add_axes([0.89, 0.25, 0.015, 0.5])
-            fig.colorbar(im, cax=cbar_ax).set_label("Normalized Entropy (0 to 1)", rotation=270, labelpad=15)
-
-            plt.suptitle(f"Perfect $H_n$: {perf_mean:.4f} | Imperfect $H_n$: {imperf_mean:.4f}",fontsize=12,y=0.93,c='#595959')
-
-            if save_plot:
-                os.makedirs(output_dir, exist_ok=True)
-                path = os.path.join(output_dir, f"split_entropy_{axis}_{self.gan_name}.png")
-                plt.savefig(path, bbox_inches="tight", dpi=400)
-                print(f"Saved split entropy plot to: {path}")
-
-            plt.show()
-
-        return {"perfect_count":len(perfect_paths),"imperfect_count":len(imperfect_paths),
-                "perfect_mean": perf_mean, "imperfect_mean": imperf_mean}
-
-    def _extract_group_entropy(self, file_paths, axis, slice_indices, dims):
-        """Internal helper to load targeted slices on the fly and compute normalized entropy."""
-        num_files = len(file_paths)
-        if num_files <= 1:
-            return None, 0.0
-
-        nz, ny, nx = dims["Z"], dims["Y"], dims["X"]
-        n_slices = len(slice_indices)
-        facies_values = self.cfg["codes"]
-        h_max = np.log2(len(facies_values))
-
-        # Initialize array shape optimized for the specific cross-section axis
-        if axis == "Z":
-            shape = (num_files, n_slices, ny, nx)
-        elif axis == "Y":
-            shape = (num_files, n_slices, nz, nx)
-        elif axis == "X":
-            shape = (num_files, n_slices, nz, ny)
-
-        slices_stack = np.zeros(shape, dtype=np.uint8)
-
-        # Single-pass loop: load only targeted data into RAM
-        for i, fp in enumerate(file_paths):
-            grid = self._load_and_map_realization(fp)
-            if axis == "Z":
-                slices_stack[i] = grid[slice_indices, :, :]
-            elif axis == "Y":
-                slices_stack[i] = grid[:, slice_indices, :].swapaxes(0, 1)
-            elif axis == "X":
-                slices_stack[i] = grid[:, :, slice_indices].transpose(2, 0, 1)
-
-        dim_y, dim_x = shape[2], shape[3]
-        entropy_maps = []
-        slice_means = []
-
-        # Calculate spatial entropy per selected slice profile
-        for idx in range(n_slices):
-            probs = np.zeros((len(facies_values), dim_y, dim_x))
-            for i, f_val in enumerate(facies_values):
-                probs[i] = (
-                    np.sum(slices_stack[:, idx, :, :] == f_val, axis=0)
-                    / num_files
-                )
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                entropy_map = entropy(probs, base=2, axis=0)
-                if h_max > 0:
-                    entropy_map = entropy_map / h_max
-
-            entropy_maps.append(entropy_map)
-            slice_means.append(np.mean(entropy_map))
-
-        return entropy_maps, np.mean(slice_means)
-
-    def plot_roc_curve(self, save_plot=False, output_dir="outputs"):
-        """Calculates and plots a Multi-Class Ensemble ROC Curve against well data."""
-        print(f"\n--- Generating Ensemble ROC Curve ---")
-        if not self.well_coords:
-            print("No well data loaded. Cannot compute ROC.")
-            return
-
-        facies_codes = self.cfg["codes"]
-        y_true_bin = label_binarize(self.well_true_facies, classes=facies_codes)
-        n_classes = len(facies_codes)
-
-        num_samples = len(self.data_files)
-        well_probs = np.zeros((len(self.well_coords), n_classes))
-
-        print(
-            f"Calculating voxel probabilities across {num_samples} realizations..."
-        )
-        for file_path in self.data_files:
-            grid = self._load_and_map_realization(file_path)
-
-            for i, (z, y, x) in enumerate(self.well_coords):
-                if (
-                    0 <= z < grid.shape[0]
-                    and 0 <= y < grid.shape[1]
-                    and 0 <= x < grid.shape[2]
-                ):
-                    pred_facies = grid[z, y, x]
-
-                    if pred_facies in facies_codes:
-                        class_idx = facies_codes.index(pred_facies)
-                        well_probs[i, class_idx] += 1
-
-        well_probs /= num_samples
-
-        fpr = dict()
-        tpr = dict()
-        roc_auc = dict()
-
-        facies_names = self.cfg["names"]
-        facies_colors = self.cfg["colors"]
-
-        fig, ax = plt.subplots(figsize=(8, 8))
-
-        for i, code in enumerate(facies_codes):
-            fpr[i], tpr[i], _ = roc_curve(y_true_bin[:, i], well_probs[:, i])
-            roc_auc[i] = auc(fpr[i], tpr[i])
-
-            ax.plot(
-                fpr[i],
-                tpr[i],
-                color=facies_colors[code],
-                lw=2.5,
-                label=f"{facies_names[code]} (AUC = {roc_auc[i]:.3f})",
-            )
-
-        ax.plot(
-            [0, 1],
-            [0, 1],
-            "k--",
-            lw=2,
-            alpha=0.5,
-            label="Random Guessing (AUC = 0.5)",
-        )
-        ax.set_xlim([-0.02, 1.0])
-        ax.set_ylim([0.0, 1.05])
-
-        ax.set_xlabel("False Positive Rate", fontsize=12)
-        ax.set_ylabel("True Positive Rate", fontsize=12)
-        ax.set_title(
-            f"Ensemble ROC Curve: {self.gan_name} vs. Well Data\n({num_samples} Realizations Evaluated)",
-            fontsize=14,
-            pad=15,
-        )
-
-        ax.legend(loc="lower right", fontsize=11, framealpha=0.9)
-        ax.grid(alpha=0.4, linestyle="--")
-        ax.set_aspect("equal")
-
-        plt.tight_layout()
-
-        if save_plot:
-            os.makedirs(output_dir, exist_ok=True)
-            plot_path = os.path.join(
-                output_dir, f"roc_curve_{num_samples}_samples.png"
-            )
-            plt.savefig(plot_path, bbox_inches="tight", dpi=300)
-            print(f"Saved ROC plot to: {plot_path}")
-
-        plt.show()
 
 
 class PostProcessing:
@@ -779,6 +367,58 @@ class PostProcessing:
             plt.tight_layout()
             plt.show()
 
+    def _plot_connectivity_distributions(self, facies_list, all_flumy_blobs, all_gan_blobs):
+        """Plots the connected component size distributions for each facies class in subplots."""
+        blob_data = []
+        for f_val in facies_list:
+            facies_name = self.cfg['names'].get(f_val, f"Facies {f_val}")
+            for size in all_flumy_blobs.get(f_val, []):
+                blob_data.append({'Facies': facies_name, 'Blob_Size': size, 'Dataset': self.flumy_name})
+            for size in all_gan_blobs.get(f_val, []):
+                blob_data.append({'Facies': facies_name, 'Blob_Size': size, 'Dataset': self.gan_name})
+        
+        df_blobs = pd.DataFrame(blob_data)
+        if df_blobs.empty:
+            return
+
+        n_facies = len(facies_list)
+        ncols = min(n_facies, 3)
+        nrows = math.ceil(n_facies / ncols)
+        
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
+        axes_list = axes.flatten()
+        
+        for idx, f_val in enumerate(facies_list):
+            ax = axes_list[idx]
+            facies_name = self.cfg['names'].get(f_val, f"Facies {f_val}")
+            sub_df = df_blobs[df_blobs['Facies'] == facies_name]
+            
+            if sub_df.empty:
+                ax.set_title(facies_name)
+                continue
+                
+            sns.histplot(
+                data=sub_df,
+                x='Blob_Size',
+                hue='Dataset',
+                kde=True,
+                element='step',
+                stat='density',
+                common_norm=False,
+                alpha=0.4,
+                ax=ax,
+                log_scale=True
+            )
+            ax.set_title(f"Connected Body Sizes: {facies_name}")
+            ax.set_xlabel("Blob Size (voxels)")
+            ax.set_ylabel("Density")
+            
+        for i in range(n_facies, len(axes_list)):
+            axes_list[i].set_visible(False)
+            
+        plt.tight_layout()
+        plt.show()
+
     def connectivity_and_pattern_analysis(self, facies_list=None, sample_limit=10, recompute_flumy=False, plot=True):
         """Executes MPS and Connectivity comparisons for ALL facies using loaded data.
 
@@ -894,11 +534,10 @@ class PostProcessing:
         print("\n" + "="*50 + "\n MULTIPLE POINT STATISTICS (MPS)\n" + "="*50)
         print(f"Total unique patterns ({self.flumy_name}): {total_flumy_patterns}")
         print(f"Total unique patterns ({self.gan_name}): {len(gan_pattern_counter)}")
-        print("\n" + "="*50 + "\n MACRO-CONNECTIVITY STATISTICS\n" + "="*50)
-        print(df_stats.to_string(index=False))
 
         if plot:
-            self._plot_pattern_distributions(facies_list, flumy_pattern_counter, gan_pattern_counter)
+            #self._plot_pattern_distributions(facies_list, flumy_pattern_counter, gan_pattern_counter)
+            self._plot_connectivity_distributions(facies_list, all_flumy_blobs, all_gan_blobs)
 
         raw_run_data = {
             'flumy_blobs': dict(all_flumy_blobs),
@@ -951,14 +590,14 @@ class PostProcessing:
             bars_gan = ax.bar(x + width/2, gan_percentages, width, color=colors, edgecolor='black', hatch='//')
             
             ax.set_xticks(x)
-            ax.set_xticklabels(labels, fontsize=11)
+            ax.set_xticklabels(labels, rotation=45, ha='right', rotation_mode='anchor', fontsize=11)
             
             for bar in bars_flumy:
                 yval = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2, yval + 1, f'{yval:.1f}%', ha='center', va='bottom', fontsize=10, color='#555555')
+                ax.text(bar.get_x() + bar.get_width()/2, yval + 1, f'{yval:.1f}%', ha='center', rotation=45, va='bottom', fontsize=10, color='#555555')
             for bar in bars_gan:
                 yval = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2, yval + 1, f'{yval:.1f}%', ha='center', va='bottom', fontsize=10, fontweight='bold')
+                ax.text(bar.get_x() + bar.get_width()/2, yval + 1, f'{yval:.1f}%', ha='center', rotation=45, va='bottom', fontsize=10, fontweight='bold')
                 
             legend_elements = [
                 mpatches.Patch(facecolor='gray', alpha=0.5, edgecolor='black', label=f'{self.flumy_name} ({len(self.flumy_samples)} samples)'),
@@ -988,7 +627,8 @@ class PostProcessing:
         if save_plot:
             filename = f"facies_distribution_{mode}.png"
             plot_path = os.path.join(self.output_dir, filename)
-            plt.savefig(plot_path, bbox_inches='tight', dpi=300)
+            plt.savefig(plot_path, bbox_inches='tight', dpi=400)
+            print(f"saved {mode} facies percentages plot to: \n{plot_path}")
             
         if show_plot: 
             plt.show()
@@ -1219,7 +859,8 @@ class PostProcessing:
             
         plt.show()
 
-    def plot_3d_entropy_pyvista(self, data_source='gan', figsize=None, show_plot=True, save_plot=True):
+    def plot_3d_entropy_pyvista(self, data_source='gan', figsize=None, show_plot=True, 
+                                save_plot=True, black_background=True, show_legend=True):
         """Renders a 3D volumetric field of full continuous coordinates uncertainty bounded at [0.0, 1.0].
 
         This function always computes and displays the global mean voxel-wise entropy of the ensemble.
@@ -1229,6 +870,8 @@ class PostProcessing:
             figsize (tuple, optional): Dimensions in pixels for the window layout. Defaults to None.
             show_plot (bool, optional): Interactive plotting execution. Defaults to True.
             save_plot (bool, optional): Screenshot file compression storage options. Defaults to True.
+            black_background (bool, optional): Toggle dark or light scene rendering environment. Defaults to True.
+            show_legend (bool, optional): Toggle color scale bar visibility. Defaults to True.
         """
         valid_sources = ['gan', 'flumy']
         if data_source not in valid_sources:
@@ -1266,6 +909,14 @@ class PostProcessing:
 
         window_size = figsize if figsize else (800, 500)
         plotter = pv.Plotter(off_screen=save_plot and not show_plot, window_size=window_size)
+        
+        # Apply background color toggle
+        bg_color = 'black' if black_background else 'white'
+        plotter.set_background(bg_color)
+        
+        # Adjust Scalar Bar color for readability based on background choice
+        text_color = 'white' if black_background else 'black'
+
         plotter.enable_anti_aliasing('msaa') 
 
         plotter.add_mesh(
@@ -1276,7 +927,8 @@ class PostProcessing:
             show_edges=False, 
             ambient=0.3,
             diffuse=0.7,
-            show_scalar_bar=False
+            show_scalar_bar=show_legend,               # Linked to your toggle argument
+            scalar_bar_args={'color': text_color}      # Clean text configuration
         )
 
         plotter.view_isometric()
@@ -1418,7 +1070,7 @@ class PostProcessing:
         plt.show()
 
 
-    def compute_slice_metrics(self, axis='Z', plot=False):
+    def compute_slice_metrics(self, axis='Z', plot=False, save_plot=False):
         """Computes aggregate scalar profiles along an axis comparing the GAN directly to the true baseline.
 
         Provides exact comparison matrices mapping spatial Divergence alongside model vs reference
@@ -1495,16 +1147,17 @@ class PostProcessing:
         print(f"Test Baseline Entropy: {summary_stats['Flumy_Entropy_Mean']:.4f} ± {summary_stats['Flumy_Entropy_Std']:.4f}")
         print(f"{self.gan_name} Model Entropy:  {summary_stats['GAN_Entropy_Mean']:.4f} ± {summary_stats['GAN_Entropy_Std']:.4f}")
         print(f"Model-to-Baseline Spatial Entropy Ratio: {summary_stats['GAN_Entropy_Mean'] / summary_stats['Flumy_Entropy_Mean']:.4f}")
+        print(f"Model-to-baseline JSD: {summary_stats['JSD_Mean']:.4f} ± {summary_stats['JSD_Std']:.4f}")
         
         csv_path = os.path.join(self.output_dir, f"slice_metrics_normalized_{axis}.csv")
         df_results.to_csv(csv_path, index=False)
 
         if plot:
-            self._plot_metric_distributions(df_results, axis)
+            self._plot_metric_distributions(df_results, axis, save_plot)
             
         return df_results, summary_stats
 
-    def _plot_metric_distributions(self, df_results, axis):
+    def _plot_metric_distributions(self, df_results, axis, save_plot):
         """Plots the metric distributions across slices.
         
         Args:
@@ -1533,12 +1186,17 @@ class PostProcessing:
         axes[1].grid(True, linestyle='--', alpha=0.7)
         
         plt.tight_layout()
+        if save_plot:
+                    plot_path = os.path.join(self.output_dir, f"JSD_{axis}_axis.png")
+                    plt.savefig(plot_path, bbox_inches='tight', dpi=400)
+                    print(f"Saved JSD plot to: {plot_path}")
         plt.show()
     
     def plot_2d_slices(self, data_source='gan', num_samples=1, num_slices=1, axis=None, 
                        slice_range=None, slice_indices=None, figsize=None, 
-                       plot_title=False, show_plot=True, save_plot=False):
-        """Visualizes 2D cross-sections (Horizontal and Vertical) of 3D realizations.
+                       plot_title=False, plot_filename=True, show_plot=True, save_plot=False, 
+                       combine_samples=True, show_legend=True):
+        """Visualizes 2D cross-sections (Horizontal and Vertical) of 3D realizations scaled to physical dimensions.
         
         Args:
             data_source (str): Target dataset to evaluate ('gan' or 'flumy').
@@ -1555,6 +1213,8 @@ class PostProcessing:
                 auto-computed based on layout.
             show_plot (bool): If True, displays the plot interactively.
             save_plot (bool): If True, saves the plot to the output directory.
+            combine_samples (bool): If True, combines all samples into a single subplot grid.
+            show_legend (bool): If True, displays the facies classification color legend.
         """
         if axis and axis.upper() not in ['X', 'Y', 'Z']:
             raise ValueError("axis must be 'X', 'Y', 'Z', or None.")
@@ -1577,256 +1237,334 @@ class PostProcessing:
         labels = [self.cfg['names'][c] for c in self.cfg['codes']]
         legend_patches = [mpatches.Patch(color=colors[i], label=labels[i]) for i in range(len(colors))]
 
-        for idx in range(plot_limit):
-            data_3d = target_data[idx]
-            
-            display_data = np.zeros_like(data_3d)
-            for map_idx, code in enumerate(self.cfg['codes']):
-                display_data[data_3d == code] = map_idx
+        # Physical spacing parameters (Z, Y, X order matching array format: depth, height, width)
+        dx, dy, dz = 20, 20, 1
 
-            depth, height, width = display_data.shape
-
-            def _resolve_slice_indices(dim_size):
-                """Resolves final slice positions from slice_indices, slice_range, or linspace."""
-                if slice_indices is not None:
-                    return np.array(slice_indices, dtype=int)
-                elif slice_range is not None:
-                    return np.linspace(slice_range[0], slice_range[1], num_slices, dtype=int)
-                else:
-                    return np.linspace(0, dim_size - 1, num_slices, dtype=int)
-
-            z_idx = _resolve_slice_indices(depth)
-            y_idx = _resolve_slice_indices(height)
-            x_idx = _resolve_slice_indices(width)
-            
-            effective_num_slices = len(slice_indices) if slice_indices is not None else num_slices
-            
-            filename = os.path.basename(files_list[idx]) if idx < len(files_list) else f"Sample_{idx}"
-
-            if axis is None:
-                effective_figsize = figsize or (18, 5 * effective_num_slices)
-                fig, axes = plt.subplots(effective_num_slices, 3, figsize=effective_figsize)
-                
-                if effective_num_slices == 1:
-                    axes = np.expand_dims(axes, axis=0) 
-                
-                for i in range(effective_num_slices):
-                    axes[i, 0].imshow(display_data[z_idx[i], :, :], cmap=cmap, origin='lower', vmin=0, vmax=len(self.cfg['codes'])-1)
-                    axes[i, 0].set_title(f"Horizontal Slice (Z={z_idx[i]})")
-                    axes[i, 0].set_xlabel("X (Width)")
-                    axes[i, 0].set_ylabel("Y (Height)")
-
-                    axes[i, 1].imshow(display_data[:, y_idx[i], :], cmap=cmap, origin='lower', aspect=1, vmin=0, vmax=len(self.cfg['codes'])-1) 
-                    axes[i, 1].set_title(f"Vertical Section (Y={y_idx[i]})")
-                    axes[i, 1].set_xlabel("X (Width)")
-                    axes[i, 1].set_ylabel("Z (Depth)")
-
-                    axes[i, 2].imshow(display_data[:, :, x_idx[i]], cmap=cmap, origin='lower', aspect=1, vmin=0, vmax=len(self.cfg['codes'])-1)
-                    axes[i, 2].set_title(f"Vertical Section (X={x_idx[i]})")
-                    axes[i, 2].set_xlabel("Y (Height)")
-                    axes[i, 2].set_ylabel("Z (Depth)")
-
+        def _resolve_slice_indices(dim_size):
+            if slice_indices is not None:
+                return np.array(slice_indices, dtype=int)
+            elif slice_range is not None:
+                return np.linspace(slice_range[0], slice_range[1], num_slices, dtype=int)
             else:
-                ncols = min(effective_num_slices, 4)
-                nrows = math.ceil(effective_num_slices / ncols)
+                return np.linspace(0, dim_size - 1, num_slices, dtype=int)
+
+        sample_data_0 = target_data[0]
+        depth, height, width = sample_data_0.shape
+        z_idx_template = _resolve_slice_indices(depth)
+        effective_num_slices = len(z_idx_template)
+
+        if combine_samples:
+            if axis is None:
+                total_rows = plot_limit * effective_num_slices
+                effective_figsize = figsize or (18, 5 * total_rows)
+                fig, axes = plt.subplots(total_rows, 3, figsize=effective_figsize, squeeze=False)
+                
+                plot_row = 0
+                for idx in range(plot_limit):
+                    data_3d = target_data[idx]
+                    display_data = np.zeros_like(data_3d)
+                    for map_idx, code in enumerate(self.cfg['codes']):
+                        display_data[data_3d == code] = map_idx
+                    if plot_filename:    
+                        filename = os.path.basename(files_list[idx]) if idx < len(files_list) else f"Sample_{idx}"
+                    else:
+                        filename=""
+                    z_idx = _resolve_slice_indices(data_3d.shape[0])
+                    y_idx = _resolve_slice_indices(data_3d.shape[1])
+                    x_idx = _resolve_slice_indices(data_3d.shape[2])
+                    
+                    for i in range(effective_num_slices):
+                        # Z-Slice (XY Plane): Horizontal View
+                        extent_z = [0, width * dx, 0, height * dy]
+                        axes[plot_row, 0].imshow(display_data[z_idx[i], :, :], cmap=cmap, origin='lower', 
+                                                 vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_z, aspect='equal')
+                        axes[plot_row, 0].set_title(f"{filename} | Horiz (Z={z_idx[i] * dz}m)")
+                        axes[plot_row, 0].set_xlabel("X Distance (m)")
+                        axes[plot_row, 0].set_ylabel("Y Distance (m)")
+
+                        # Y-Slice (XZ Plane): Vertical View
+                        extent_y = [0, width * dx, 0, depth * dz]
+                        axes[plot_row, 1].imshow(display_data[:, y_idx[i], :], cmap=cmap, origin='lower', 
+                                                 vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_y, aspect='20') 
+                        axes[plot_row, 1].set_title(f"{filename} | Vert (Y={y_idx[i] * dy}m)")
+                        axes[plot_row, 1].set_xlabel("X Distance (m)")
+                        axes[plot_row, 1].set_ylabel("Z Distance (m)")
+
+                        # X-Slice (YZ Plane): Vertical View
+                        extent_x = [0, height * dy, 0, depth * dz]
+                        axes[plot_row, 2].imshow(display_data[:, :, x_idx[i]], cmap=cmap, origin='lower', 
+                                                 vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_x, aspect='20')
+                        axes[plot_row, 2].set_title(f"{filename} | Vert (X={x_idx[i] * dx}m)")
+                        axes[plot_row, 2].set_xlabel("Y Distance (m)")
+                        axes[plot_row, 2].set_ylabel("Z Distance (m)")
+                        plot_row += 1
+            else:
+                total_plots = plot_limit * effective_num_slices
+                ncols = min(total_plots, 3)
+                nrows = math.ceil(total_plots / ncols)
                 effective_figsize = figsize or (5 * ncols, 5 * nrows)
                 
                 fig, axes = plt.subplots(nrows, ncols, figsize=effective_figsize)
                 axes_list = np.atleast_1d(axes).flatten()
-
-                idx_map = {'Z': z_idx, 'Y': y_idx, 'X': x_idx}
-                current_indices = idx_map[axis]
-
-                for i in range(effective_num_slices):
-                    ax = axes_list[i]
-                    if axis == 'Z':
-                        ax.imshow(display_data[current_indices[i], :, :], cmap=cmap, origin='lower', vmin=0, vmax=len(self.cfg['codes'])-1)
-                        ax.set_title(f"Horizontal Slice (Z={current_indices[i]})")
-                        ax.set_xlabel("X (Width)")
-                        ax.set_ylabel("Y (Height)")
-                    elif axis == 'Y':
-                        ax.imshow(display_data[:, current_indices[i], :], cmap=cmap, origin='lower', aspect=1, vmin=0, vmax=len(self.cfg['codes'])-1)
-                        ax.set_title(f"Vertical Section (Y={current_indices[i]})")
-                        ax.set_xlabel("X (Width)")
-                        ax.set_ylabel("Z (Depth)")
-                    elif axis == 'X':
-                        ax.imshow(display_data[:, :, current_indices[i]], cmap=cmap, origin='lower', aspect=1, vmin=0, vmax=len(self.cfg['codes'])-1)
-                        ax.set_title(f"Vertical Section (X={current_indices[i]})")
-                        ax.set_xlabel("Y (Height)")
-                        ax.set_ylabel("Z (Depth)")
-
-                for i in range(effective_num_slices, len(axes_list)):
+                
+                plot_idx = 0
+                for idx in range(plot_limit):
+                    data_3d = target_data[idx]
+                    display_data = np.zeros_like(data_3d)
+                    for map_idx, code in enumerate(self.cfg['codes']):
+                        display_data[data_3d == code] = map_idx
+                    
+                    if plot_filename:
+                        filename = os.path.basename(files_list[idx]) if idx < len(files_list) else f"Sample_{idx}"
+                    else:
+                        filename=""
+                    dim_size = data_3d.shape[{'Z': 0, 'Y': 1, 'X': 2}[axis]]
+                    current_indices = _resolve_slice_indices(dim_size)
+                    
+                    for i in range(effective_num_slices):
+                        ax = axes_list[plot_idx]
+                        if axis == 'Z':
+                            extent_z = [0, width * dx, 0, height * dy]
+                            ax.imshow(display_data[current_indices[i], :, :], cmap=cmap, origin='lower', 
+                                      vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_z, aspect='equal')
+                            ax.set_title(f"{filename} (depth={current_indices[i] * dz}m)")
+                            ax.set_xlabel("X Distance (m)")
+                            ax.set_ylabel("Y Distance (m)")
+                        elif axis == 'Y':
+                            extent_y = [0, width * dx, 0, depth * dz]
+                            ax.imshow(display_data[:, current_indices[i], :], cmap=cmap, origin='lower', 
+                                      vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_y, aspect=20)
+                            ax.set_title(f"{filename} (Y= {current_indices[i] * dy}m)")
+                            ax.set_xlabel("X Distance (m)")
+                            ax.set_ylabel("Z Depth (m)")
+                        elif axis == 'X':
+                            extent_x = [0, height * dy, 0, depth * dz]
+                            ax.imshow(display_data[:, :, current_indices[i]], cmap=cmap, origin='lower', 
+                                      vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_x, aspect=20)
+                            ax.set_title(f"{filename} (X= {current_indices[i] * dx}m)")
+                            ax.set_xlabel("Y Distance (m)")
+                            ax.set_ylabel("Z Depth (m)")
+                        plot_idx += 1
+                        
+                for i in range(plot_idx, len(axes_list)):
                     axes_list[i].set_visible(False)
 
-            fig.legend(handles=legend_patches, loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.02), fontsize=12)
+            if show_legend:
+                fig.legend(handles=legend_patches, loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.05), fontsize=8)
+                
             if plot_title:
-                plt.suptitle(f"{display_name} | Realization: {filename} | Shape: {data_3d.shape}", fontsize=16, fontweight='bold', y=1.02)
-            
+                ax_label = axis if axis else "All_Axes"
+                plt.suptitle(f"{display_name}", fontsize=12, fontweight='bold', x= 0.15, y=0.95)
+                
             if save_plot:
                 ax_label = axis if axis else "All_Axes"
-                plot_path = os.path.join(self.output_dir, f"2d_slices_{data_source}_{ax_label}_{effective_num_slices}slices_{filename.replace('.npy', '.png')}")
+                plot_path = os.path.join(self.output_dir, f"combined_grid_{data_source}_{ax_label}_{plot_limit}samples.png")
                 plt.savefig(plot_path, bbox_inches='tight', dpi=300)
-                print(f"Saved 2D slices to: {plot_path}")
+                print(f"Saved combined 2D grid matrix to: {plot_path}")
                 
             if show_plot:
                 plt.show()
             else:
                 plt.close(fig)
 
+        else:
+            for idx in range(plot_limit):
+                data_3d = target_data[idx]
+                display_data = np.zeros_like(data_3d)
+                for map_idx, code in enumerate(self.cfg['codes']):
+                    display_data[data_3d == code] = map_idx
+
+                depth, height, width = display_data.shape
+                z_idx = _resolve_slice_indices(depth)
+                y_idx = _resolve_slice_indices(height)
+                x_idx = _resolve_slice_indices(width)
+                
+                filename = os.path.basename(files_list[idx]) if idx < len(files_list) else f"Sample_{idx}"
+
+                if axis is None:
+                    effective_figsize = figsize or (18, 5 * effective_num_slices)
+                    fig, axes = plt.subplots(effective_num_slices, 3, figsize=effective_figsize)
+                    if effective_num_slices == 1:
+                        axes = np.expand_dims(axes, axis=0) 
+                    
+                    for i in range(effective_num_slices):
+                        # XY Plane
+                        extent_z = [0, width * dx, 0, height * dy]
+                        axes[i, 0].imshow(display_data[z_idx[i], :, :], cmap=cmap, origin='lower', 
+                                          vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_z, aspect='equal')
+                        axes[i, 0].set_title(f"Horizontal Slice (depth= {z_idx[i] * dz}m)")
+                        axes[i, 0].set_xlabel("X Distance (m)")
+                        axes[i, 0].set_ylabel("Y Distance (m)")
+
+                        # XZ Plane
+                        extent_y = [0, width * dx, 0, depth * dz]
+                        axes[i, 1].imshow(display_data[:, y_idx[i], :], cmap=cmap, origin='lower', 
+                                          vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_y, aspect='auto') 
+                        axes[i, 1].set_title(f"Vertical Section (Y={y_idx[i] * dy}m)")
+                        axes[i, 1].set_xlabel("X Distance (m)")
+                        axes[i, 1].set_ylabel("Z Distance (m)")
+
+                        # YZ Plane
+                        extent_x = [0, height * dy, 0, depth * dz]
+                        axes[i, 2].imshow(display_data[:, :, x_idx[i]], cmap=cmap, origin='lower', 
+                                          vmin=0, vmax=len(self.cfg['codes'])-1, extent=extent_x, aspect='auto')
+                        axes[i, 2].set_title(f"Vertical Section (X={x_idx[i] * dx}m)")
+                        axes[i, 2].set_xlabel("Y Distance (m)")
+                        axes[i, 2].set_ylabel("Z Distance (m)")
+                else:
+                    ncols = min(effective_num_slices, 4)
+                    nrows = math.ceil(effective_num_slices / ncols)
+                    effective_figsize = figsize or (5 * ncols, 5 * nrows)
+                    
+                    fig, axes = plt.subplots(nrows, ncols, figsize=effective_figsize)
+                    axes_list = np.atleast_1d(axes).flatten()
+
+                    idx_map = {'Z': z_idx, 'Y': y_idx, 'X': x_idx}
+                    current_indices = idx_map[axis]
+
+                    for i in range(effective_num_slices):
+                        ax = axes_list[i]
+                        if axis == 'Z':
+                            extent_z = [0, width * dx, 0, height * dy]
+                            ax.imshow(display_data[current_indices[i], :, :], cmap=cmap, origin='lower',
+                                      vmin=0, vmax=len(self.cfg['codes'])-1, interpolation='antialiased', interpolation_stage='rgba', extent=extent_z, aspect='equal')
+                            ax.set_title(f"Horizontal Slice (Z={current_indices[i] * dz}m)")
+                            ax.set_xlabel("X Distance (m)")
+                            ax.set_ylabel("Y Distance (m)")
+                        elif axis == 'Y':
+                            extent_y = [0, width * dx, 0, depth * dz]
+                            ax.imshow(display_data[:, current_indices[i], :], cmap=cmap, origin='lower',
+                                      vmin=0, vmax=len(self.cfg['codes'])-1, interpolation='antialiased', interpolation_stage='rgba', extent=extent_y, aspect='auto')
+                            ax.set_title(f"Vertical Section (Y={current_indices[i] * dy}m)")
+                            ax.set_xlabel("X Distance (m)")
+                            ax.set_ylabel("Z Distance (m)")
+                        elif axis == 'X':
+                            extent_x = [0, height * dy, 0, depth * dz]
+                            ax.imshow(display_data[:, :, current_indices[i]], cmap=cmap, origin='lower',
+                                      vmin=0, vmax=len(self.cfg['codes'])-1, interpolation='antialiased', interpolation_stage='rgba', extent=extent_x, aspect='auto')
+                            ax.set_title(f"Vertical Section (X={current_indices[i] * dx}m)")
+                            ax.set_xlabel("Y Distance (m)")
+                            ax.set_ylabel("Z Distance (m)")
+
+                    for i in range(effective_num_slices, len(axes_list)):
+                        axes_list[i].set_visible(False)
+
+                if show_legend:
+                    fig.legend(handles=legend_patches, loc='lower center', ncol=3, bbox_to_anchor=(0.5, -0.02), fontsize=12)
+                    
+                if plot_title:
+                    plt.suptitle(f"{display_name} | Realization: {filename} | Shape: {data_3d.shape}", fontsize=16, fontweight='bold', y=1.02)
+                
+                if save_plot:
+                    ax_label = axis if axis else "All_Axes"
+                    plot_path = os.path.join(self.output_dir, f"2d_slices_{data_source}_{ax_label}_{effective_num_slices}slices_{filename.replace('.npy', '.png')}")
+                    plt.savefig(plot_path, bbox_inches='tight', dpi=400)
+                    print(f"Saved 2D slices to: {plot_path}")
+                    
+                if show_plot:
+                    plt.show()
+                else:
+                    plt.close(fig)
+
     def plot_3d_pyvista(self, data_source='gan', mode='separate', target_filename=None, target_facies=None, 
-                    figsize=None, show_legend=True, show_plot=True, save_plot=True):
-        """Renders an interactive or static 3D volumetric plot of a geological sample.
-
-        Args:
-            data_source (str, optional): Target dataset to sample ('gan' or 'flumy'). Defaults to 'gan'.
-            mode (str, optional): Visual layout mode ('separate' for subplots, or 'combined' for 
-                a single overlaid volume). Defaults to 'separate'.
-            target_filename (str, optional): Specific filename to load (e.g., 'realization_01.npy'). 
-                If None, a random sample is chosen from loaded data.
-            target_facies (int or list, optional): Specific facies code(s) to isolate (e.g., 1, 4, or 8). 
-                If None, plots all standard facies.
-            figsize (tuple, optional): Window size as (width, height) in pixels for the PyVista renderer.
-                If None, uses default (800 * num_subplots, 800) for separate or (800, 800) for combined.
-            show_legend (bool, optional): Toggles legend in combined mode. Defaults to True.
-            show_plot (bool, optional): If True, opens an interactive PyVista window. Defaults to True.
-            save_plot (bool, optional): If True, saves an off-screen screenshot. Defaults to False.
-
-        Raises:
-            ValueError: If input arguments do not match expected constraints.
-        """
-        valid_sources = ['gan', 'flumy']
-        valid_modes = ['separate', 'combined']
-        
-        if data_source not in valid_sources:
-            raise ValueError(f"Invalid data_source '{data_source}'. Choose from {valid_sources}.")
-        if mode not in valid_modes:
-            raise ValueError(f"Invalid mode '{mode}'. Choose from {valid_modes}.")
+                            figsize=None, show_legend=True, show_plot=True, save_plot=True, black_background=False):
+            """Renders an interactive or static 3D volumetric plot of a geological sample."""
+            valid_sources = ['gan', 'flumy']
+            valid_modes = ['separate', 'combined']
             
-        try:
-            import pyvista as pv
-            pv.set_jupyter_backend('static') 
-        except ImportError:
-            print("Error: 'pyvista' is not installed. Skipping 3D plot.")
-            return
-
-        display_name = self.flumy_name if data_source == 'flumy' else self.gan_name
-        print(f"\n--- Generating 3D PyVista Plot ({display_name} | Mode: {mode.upper()}) ---")
-
-        facies_colors = self.cfg['colors']
-        facies_titles = self.cfg['names']
-
-        plot_identifier = ""
-        if target_filename:
-            file_list = self.gan_files if data_source == 'gan' else self.data_files
-            matched_file = next((f for f in file_list if target_filename in f), None)
-            
-            if matched_file:
-                print(f"Loading specific file: {matched_file}")
-                data_3d = self._load_gan(matched_file) if data_source == 'gan' else self._load_data(matched_file)
-                plot_identifier = target_filename.split('.')[0]
-            else:
-                print(f"Warning: '{target_filename}' not found. Falling back to random sample.")
-                target_filename = None
-
-        if not target_filename:
-            if data_source == 'gan' and not self.gan_data:
-                self.load_gan_samples()
-            elif data_source == 'flumy' and not self.flumy_samples:
-                self.load_flumy_samples() 
+            if data_source not in valid_sources:
+                raise ValueError(f"Invalid data_source '{data_source}'. Choose from {valid_sources}.")
+            if mode not in valid_modes:
+                raise ValueError(f"Invalid mode '{mode}'. Choose from {valid_modes}.")
                 
-            target_data = self.gan_data if data_source == 'gan' else self.flumy_samples
-            random_idx = random.randint(0, len(target_data) - 1)
-            data_3d = target_data[random_idx]
-            plot_identifier = f"sample_{random_idx}"
-
-        nz, ny, nx = data_3d.shape
-        grid = pv.ImageData()
-        grid.dimensions = (nx + 1, ny + 1, nz + 1)
-        grid.cell_data['Facies'] = data_3d.transpose(2, 1, 0).flatten(order='F')
-
-        if target_facies is None:
-            facies_to_plot = self.cfg['codes']
-        elif isinstance(target_facies, int):
-            facies_to_plot = [target_facies]
-        else:
-            facies_to_plot = target_facies
+            try:
+                import pyvista as pv
+                pv.set_jupyter_backend('static') 
+            except ImportError:
+                print("Error: 'pyvista' is not installed. Skipping 3D plot.")
+                return
             
-        if len(facies_to_plot) == 1 and mode == 'separate':
-            mode = 'combined'
+            # 1. Define UI colors based on toggle
+            bg_color = 'black' if black_background else 'white'
+            text_color = 'white' if black_background else 'black'
 
-        base_height = 500
-        base_width = 800
-        scale_factor = 2
-        
-        if mode == 'separate':
-            num_subplots = len(facies_to_plot)
-            default_window_size = (base_width * num_subplots, base_height)
-        else:
-            num_subplots = 1
-            default_window_size = (base_width, base_height)
+            display_name = self.flumy_name if data_source == 'flumy' else self.gan_name
+            print(f"\n--- Generating 3D PyVista Plot ({display_name} | Mode: {mode.upper()}) ---")
 
-        window_size = figsize if figsize else default_window_size
+            facies_colors = self.cfg['colors']
+            facies_titles = self.cfg['names']
 
-        if mode == 'separate':
-            plotter = pv.Plotter(
-                shape=(1, num_subplots), 
-                image_scale=scale_factor, 
-                off_screen=save_plot and not show_plot, 
-                window_size=window_size
-            )
-        else:
-            plotter = pv.Plotter(
-                shape=(1, 1), 
-                image_scale=scale_factor, 
-                off_screen=save_plot and not show_plot, 
-                window_size=window_size
-            )
+            # File loading logic
+            plot_identifier = ""
+            if target_filename:
+                file_list = self.gan_files if data_source == 'gan' else self.data_files
+                matched_file = next((f for f in file_list if target_filename in f), None)
+                if matched_file:
+                    data_3d = self._load_gan(matched_file) if data_source == 'gan' else self._load_data(matched_file)
+                    plot_identifier = target_filename.split('.')[0]
+                else:
+                    print(f"Warning: '{target_filename}' not found. Falling back to random sample.")
+                    target_filename = None
+
+            if not target_filename:
+                if data_source == 'gan' and not self.gan_data: self.load_gan_samples()
+                elif data_source == 'flumy' and not self.flumy_samples: self.load_flumy_samples() 
+                target_data = self.gan_data if data_source == 'gan' else self.flumy_samples
+                random_idx = random.randint(0, len(target_data) - 1)
+                data_3d = target_data[random_idx]
+                plot_identifier = f"sample_{random_idx}"
+
+            nz, ny, nx = data_3d.shape
+            grid = pv.ImageData()
+            grid.dimensions = (nx + 1, ny + 1, nz + 1)
+            grid.cell_data['Facies'] = data_3d.transpose(2, 1, 0).flatten(order='F')
+
+            facies_to_plot = [target_facies] if isinstance(target_facies, int) else (target_facies or self.cfg['codes'])
+            if len(facies_to_plot) == 1 and mode == 'separate': mode = 'combined'
+
+            # Plotter Setup
+            num_subplots = len(facies_to_plot) if mode == 'separate' else 1
+            window_size = figsize if figsize else ((800 * num_subplots if mode == 'separate' else 800), 500)
             
-        plotter.enable_anti_aliasing('msaa') 
-            
-        for i, f_val in enumerate(facies_to_plot):
-            if f_val not in facies_colors:
-                continue
+            plotter = pv.Plotter(shape=(1, num_subplots), off_screen=save_plot and not show_plot, window_size=window_size)
+            plotter.set_background(bg_color)
+            plotter.enable_anti_aliasing('msaa') 
                 
-            if mode == 'separate':
-                plotter.subplot(0, i)
-                plotter.add_text(facies_titles[f_val], font_size=150, color='black', shadow=True) 
-                
-            threshed = grid.threshold([f_val - 0.5, f_val + 0.5], scalars='Facies')
+            # Single loop to add meshes
+            for i, f_val in enumerate(facies_to_plot):
+                if f_val not in facies_colors: continue
+                    
+                if mode == 'separate':
+                    plotter.subplot(0, i)
+                    plotter.add_text(facies_titles[f_val], font_size=20, color=text_color, shadow=True) 
+                    
+                threshed = grid.threshold([f_val - 0.5, f_val + 0.5], scalars='Facies')
+                if threshed.n_points > 0:
+                    plotter.add_mesh(threshed, color=facies_colors[f_val], show_edges=False, ambient=0.2, diffuse=0.8,
+                                    label=facies_titles[f_val] if mode == 'combined' else None)
+                    
+                if mode == 'separate':
+                    plotter.view_isometric()
+                    plotter.camera.elevation -= 10
+
+            # FIXED: Removed 'color=text_color' to resolve the PyVista Renderer crash
+            if (mode == 'combined') and show_legend and len(facies_to_plot) > 1:
+                plotter.add_legend(bcolor='grey', face=None, size=(0.2, 0.2))
             
-            if threshed.n_points > 0:
-                plotter.add_mesh(
-                    threshed, 
-                    color=facies_colors[f_val], 
-                    show_edges=False, 
-                    ambient=0.2,
-                    diffuse=0.8,
-                    label=facies_titles[f_val] if mode == 'combined' else None
-                )
-                
-            if mode == 'separate':
+            if mode == 'combined':
                 plotter.view_isometric()
-                plotter.camera.elevation -= 10  # Lowers the camera angle for separate viewports
+                plotter.camera.elevation -= 10
+                plotter.camera.zoom(1.3)
 
-        if (mode == 'combined') and (show_legend == True) and len(facies_to_plot) > 1:
-            plotter.add_legend(bcolor='grey', face=None, size=(0.2, 0.2))
-        
-        if mode == 'combined':
-            plotter.view_isometric()
-            plotter.camera.elevation -= 15  # Lowers the camera angle for the unified view
-            plotter.camera.zoom(1.5)
-
-        suffix = f"_{'-'.join(map(str, facies_to_plot))}" if target_facies else ""
-        plot_path = os.path.join(self.output_dir, f"3d_plot_{data_source}_{plot_identifier}{mode}{suffix}.png")
-        
-        if save_plot:
-            plotter.show(screenshot=plot_path)
-            print(f"Saved 3D plot to: {plot_path}") 
-        elif show_plot:
-            plotter.show()
-        else:
-            plotter.close()
-
+            # Saving/Closing
+            suffix = f"_{'-'.join(map(str, facies_to_plot))}" if target_facies else ""
+            plot_path = os.path.join(self.output_dir, f"3d_plot_{data_source}_{plot_identifier}{mode}{suffix}.png")
+            
+            if save_plot:
+                plotter.show(screenshot=plot_path)
+                print(f"Saved 3D plot to: {plot_path}") 
+            elif show_plot: plotter.show()
+            else: plotter.close()
 
 class DistributionEvaluator:
     """Evaluates geological distributions using Multi-Scale Sliced Wasserstein Distance (MS-SWD).
@@ -2053,6 +1791,7 @@ class DistributionEvaluator:
         csv_path = os.path.join(self.output_dir, "msswd_mds_coordinates.csv")
         df_coords.to_csv(csv_path, index=False)
         print(f"Saved 2D coordinates to CSV: {csv_path}")
+        
         # Plot
         figsize = figsize or (8, 8)
         fig, ax = plt.subplots(figsize=figsize)
