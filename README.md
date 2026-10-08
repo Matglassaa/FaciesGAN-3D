@@ -1,5 +1,7 @@
 # FaciesGAN-3D
 
+<img src="images\3d_facies_run_5_best_model.png" alt="example of generated model" width="500" height=auto>
+
 FaciesGAN-3D is a Generative Adversarial Network model created to reproduce 3D-geological facies models on a HPC-environment. The model was created for a graduation project on leveraging the power of Deep Learning for creating ensembles of 3D geomodels. The code of the FaciesGAN model(s) are built on previous work done by:
 
 - 1:[Guillaume Rongier](https://github.com/grongier) & [Luk Peeters](https://www.researchgate.net/profile/Luk-Peeters): [Towards geological inference with process-based and deep generative modeling](https://arxiv.org/abs/2510.14445)
@@ -70,12 +72,12 @@ flowchart LR
     D --> F["04 Postprocessing<br/>well-conditioned evaluation"]
 ```
 
-### `core/` – shared utilities
+<!-- ### `core/` – shared utilities
 | File | Purpose |
 | --- | --- |
 | `custom_plots.py` | Global matplotlib style (`apply_custom_plotting_flavor`) and the `FaciesColorMap` used in all figures. |
 | `facies_config.json` | Integer code and colour for each of the 13 FLUMY facies (+ background). |
-| `dataloader.py`, `utils.py` | Shared versions of the dataset class and config helpers (see `02_training/`). |
+| `dataloader.py`, `utils.py` | Shared versions of the dataset class and config helpers (see `02_training/`). | -->
 
 ### `01_preprocessing/` – building the training set
 | File | Purpose |
