@@ -1,6 +1,11 @@
 # FaciesGAN-3D
 
-<img src="images\3d_facies_run_5_best_model.png" alt="example of generated model" width="500" height=auto>
+<div style="text-align: center;">
+  <img src="images/3d_facies_run_5_best_model.png" 
+       alt="example of generated model" 
+       width="500" 
+       style="height: auto;">
+</div>
 
 FaciesGAN-3D is a Generative Adversarial Network model created to reproduce 3D-geological facies models on a HPC-environment. The model was created for a graduation project on leveraging the power of Deep Learning for creating ensembles of 3D geomodels. The code of the FaciesGAN model(s) are built on previous work done by:
 
