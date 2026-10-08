@@ -1,0 +1,34 @@
+name: fluvgan_hpc_environment
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge 
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=1.26
+  - scipy
+  - pandas
+  - xarray
+  - scikit-learn
+  - matplotlib
+  - cmocean
+  - jupyter
+  - h5py
+  - tqdm
+  - joblib
+  - bottleneck
+  - opt_einsum
+  - attrdict
+  # Core Deep Learning Stack for Linux/A100s
+  - pytorch=2.2.1
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - pip:
+      - voxgan==0.0.2
+      - pyro-ppl==1.9.0
+      - pyvista==0.45.2
+      # Add flumy here if you install it via pip/wheel, e.g.:
+      # - flumy
