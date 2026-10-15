@@ -1,7 +1,7 @@
 # FaciesGAN-3D
 
 <div style="text-align: center;">
-  <img src="images/3d_facies_run_5_best_model.png" 
+  <img src="example.png" 
        alt="example of generated model" 
        width="500" 
        style="height: auto;">
