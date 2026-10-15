@@ -34,7 +34,7 @@ scripts_dir = Path(__file__).resolve().parents[2]
 if str(scripts_dir) not in sys.path:
     sys.path.append(str(scripts_dir))
 
-from gan_pipeline.core.custom_plots import apply_custom_plotting_flavor, FaciesColorMap
+from scripts.core.custom_plots import apply_custom_plotting_flavor, FaciesColorMap
 
 apply_custom_plotting_flavor()
 
