@@ -11,7 +11,6 @@ __pycache__/
 *.h5
 
 # ignore full directories of models and datasets
-datasets/well_data/DELGT01_DELGT02_wireline_logs
 
 # Distribution / packaging
 .Python
@@ -27,8 +26,8 @@ parts/
 sdist/
 var/
 wheels/
-outputs/
 datasets/
+outputs/
 plots/
 graphify-out/
 share/python-wheels/
