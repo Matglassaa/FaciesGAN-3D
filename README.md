@@ -141,9 +141,14 @@ python fluvgan_pivotal_tuning.py --model_path <run>/<checkpoint>.pt --optimized_
 | `postprocessing_after_optimizing.ipynb` | Evaluation of the LSO results (thesis Section 4.3.1). |
 | `postprocessing_after_editing.ipynb` | Evaluation of the Pivotal Tuning results (thesis Section 4.3.2). |
 
+## Data availability
+The training and testing dataset for training the GAN model are publicly available and distributed under an open Licence. 
+
+**NOTE:** The well data used in this project originates from the Delft Geothermal Reservoir Injector(DEL-GT-01) and Producer(DEL-GT-02-S2). This data is not publically available. You may create your own well data based on the facies values found in the dataset.
+
 ## License
 
-Copyright notice: Technische Universiteit Delft hereby disclaims all copyright interest in the program fluvgan written by the Author(s). Prof.dr.ir. S.G.J. Aarninkhof, Dean of the Faculty of Civil Engineering and Geosciences
+Copyright notice: Technische Universiteit Delft hereby disclaims all copyright interest in the program FaciesGAN-3D written by the Author(s). Prof.dr.ir. S.G.J. Aarninkhof, Dean of the Faculty of Civil Engineering and Geosciences
 
 &#169; 2026, Mathias Ruhe
 
